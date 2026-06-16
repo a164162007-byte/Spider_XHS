@@ -1,0 +1,9 @@
+.git
+__pycache__
+node_modules
+*.pyc
+.env
+datas/
+.gitignore
+README.md
+author/
