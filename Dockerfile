@@ -39,4 +39,5 @@ EXPOSE 5000
 ENV PYTHONUNBUFFERED=1
 ENV NODE_ENV=production
 
-CMD ["python", "-m", "spider.spider"]
+# 默认启动定时爬取脚本（原有 spider.py 保留不动）
+CMD ["python", "run_search.py"]
