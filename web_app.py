@@ -3,8 +3,15 @@
 提供浏览器可操作的完整 Web 界面，覆盖原项目所有功能
 原有代码 (spider/, apis/, xhs_utils/) 一个字不动
 
+运行流程：
+  1. 容器启动 → Web后台自动运行（无需任何环境变量）
+  2. 浏览器打开 http://群晖IP:5000
+  3. 先扫码登录 → Cookie自动保存
+  4. 然后使用搜索/爬取/定时等功能
+  5. 重启容器后Cookie自动复用，无需重复登录
+
 Docker 使用：
-  docker run -d -p 5000:5000 -v /你的路径/datas:/app/datas ghcr.io/a164162007-byte/spider_xhs:latest python web_app.py
+  docker run -d -p 5000:5000 -v /你的路径/datas:/app/datas ghcr.io/a164162007-byte/spider_xhs:latest
 """
 import os
 import sys
@@ -42,6 +49,7 @@ app_state = {
     'user_info': None,
     'qr_image_b64': None,
     'login_message': '未登录',
+    'cookie_valid': False,          # Cookie是否经过验证有效
 
     # 任务
     'current_task': None,           # 当前运行的任务描述
@@ -80,6 +88,7 @@ logger.add(web_log.write, level="INFO", format="{message}")
 
 # ========== Cookie 管理 ==========
 def load_saved_cookies():
+    """从文件加载已保存的cookie，返回 (cookies_str, login_time) 或 (None, None)"""
     if os.path.exists(COOKIE_FILE):
         try:
             with open(COOKIE_FILE, 'r', encoding='utf-8') as f:
@@ -93,6 +102,7 @@ def load_saved_cookies():
 
 
 def save_cookies_to_file(cookies_str):
+    """保存cookie到文件"""
     os.makedirs(os.path.dirname(COOKIE_FILE), exist_ok=True)
     data = {
         'cookies': cookies_str,
@@ -103,7 +113,7 @@ def save_cookies_to_file(cookies_str):
 
 
 def validate_cookies(cookies_str):
-    """快速验证cookie是否有效"""
+    """验证cookie是否有效（发一次真实API请求）"""
     try:
         xhs_apis = XHS_Apis()
         success, msg, _ = xhs_apis.search_some_note(
@@ -158,7 +168,7 @@ def do_qrcode_login():
         app_state['qr_image_b64'] = qr_b64
         app_state['login_message'] = '请使用小红书APP扫描二维码'
 
-    logger.info('二维码已生成，请扫码')
+    logger.info('二维码已生成，请用小红书APP扫码')
 
     # 3. 等待扫码
     logger.info('[3/4] 等待扫码...')
@@ -189,6 +199,7 @@ def do_qrcode_login():
     with state_lock:
         app_state['login_status'] = 'success'
         app_state['cookies_str'] = cookies_str
+        app_state['cookie_valid'] = True
         app_state['user_info'] = {'nickname': nickname, 'red_id': red_id}
         app_state['login_message'] = f'已登录: {nickname}'
         app_state['qr_image_b64'] = None
@@ -198,7 +209,7 @@ def do_qrcode_login():
 
 # ========== 任务执行 ==========
 def get_cookies_str():
-    """获取当前有效的 cookie"""
+    """获取当前有效的 cookie，优先内存→文件"""
     with state_lock:
         if app_state['cookies_str']:
             return app_state['cookies_str']
@@ -366,6 +377,7 @@ def task_scheduled_crawl(config):
                         logger.error('Cookie可能已失效，停止定时任务')
                         with state_lock:
                             app_state['scheduled_running'] = False
+                            app_state['cookie_valid'] = False
                         break
                     continue
 
@@ -445,9 +457,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 .nav{background:var(--card);border-bottom:1px solid var(--border);padding:12px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}
 .nav h1{color:var(--red);font-size:18px}
 .nav-right{display:flex;align-items:center;gap:12px}
-.login-badge{padding:4px 12px;border-radius:12px;font-size:12px;font-weight:600}
+.login-badge{padding:4px 12px;border-radius:12px;font-size:12px;font-weight:600;cursor:pointer;transition:all .2s}
 .badge-logged{background:#0d2818;color:var(--green)}
 .badge-not{background:#2d0f0f;color:var(--red)}
+.badge-logging{background:#0d2137;color:var(--blue)}
 .tabs{display:flex;background:var(--card);border-bottom:1px solid var(--border);padding:0 16px;overflow-x:auto}
 .tab{padding:12px 20px;cursor:pointer;color:var(--muted);font-size:14px;border-bottom:2px solid transparent;white-space:nowrap;transition:all .2s}
 .tab:hover{color:var(--text)}
@@ -492,6 +505,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 .chip-red{background:#2d0f0f;color:var(--red)}
 .task-info{font-size:13px;color:var(--muted);margin-bottom:10px}
 .schedule-cfg{font-size:12px;color:var(--muted);line-height:1.8}
+.login-required{background:#2d0f0f;border:1px solid #5c1a1a;border-radius:10px;padding:30px;text-align:center;margin-bottom:16px}
+.login-required p{color:var(--red);font-size:15px;margin-bottom:12px}
+.login-required .btn{margin-top:8px}
 @media(max-width:600px){.row{flex-direction:column}.row .form-group{min-width:auto}.nav h1{font-size:15px}}
 </style>
 </head>
@@ -499,7 +515,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 <div class="nav">
   <h1>📕 小红书爬虫</h1>
   <div class="nav-right">
-    <span id="loginBadge" class="login-badge badge-not">未登录</span>
+    <span id="loginBadge" class="login-badge badge-not" onclick="switchTab('login')">未登录</span>
   </div>
 </div>
 <div class="tabs">
@@ -525,22 +541,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
     </div>
     <div style="text-align:center;margin-top:12px">
       <button id="btnQR" class="btn btn-primary" onclick="startLogin()">获取二维码</button>
-      <button class="btn btn-secondary" onclick="checkCookie()" style="margin-left:8px">检查Cookie</button>
+      <button class="btn btn-secondary" onclick="checkCookie()" style="margin-left:8px">验证Cookie</button>
       <button class="btn btn-danger btn-sm" onclick="clearCookie()" style="margin-left:8px">清除Cookie</button>
     </div>
     <div style="margin-top:16px;font-size:12px;color:var(--muted);line-height:1.8">
-      <b>使用方法：</b><br>
-      1. 点击"获取二维码"<br>
+      <b>使用流程：</b><br>
+      1. 点击「获取二维码」<br>
       2. 打开小红书APP → 扫一扫 → 确认登录<br>
       3. 登录成功后Cookie自动保存，下次无需再扫<br>
-      4. 也可以在群晖 File Station 查看 <code>datas/qrcode_login.png</code>
+      4. 也可以在群晖 File Station 查看 <code>datas/qrcode_login.png</code> 扫码<br><br>
+      <b>⚠️ 注意：</b>必须先登录才能使用搜索和爬取功能
     </div>
   </div>
 </div>
 
 <!-- 搜索笔记页 -->
 <div id="page-search" class="page">
-  <div class="card">
+  <div id="searchLoginReq" class="login-required" style="display:none">
+    <p>⚠️ 请先扫码登录后使用搜索功能</p>
+    <button class="btn btn-primary" onclick="switchTab('login')">去登录</button>
+  </div>
+  <div id="searchForm" class="card">
     <h2>搜索关键词笔记</h2>
     <div class="form-group">
       <label>关键词</label>
@@ -569,7 +590,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 
 <!-- 爬取笔记页 -->
 <div id="page-notes" class="page">
-  <div class="card">
+  <div id="notesLoginReq" class="login-required" style="display:none">
+    <p>⚠️ 请先扫码登录后使用爬取功能</p>
+    <button class="btn btn-primary" onclick="switchTab('login')">去登录</button>
+  </div>
+  <div id="notesForm" class="card">
     <h2>爬取笔记详情</h2>
     <div class="form-group">
       <label>笔记URL（每行一个）</label>
@@ -581,7 +606,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 
 <!-- 爬取用户页 -->
 <div id="page-user" class="page">
-  <div class="card">
+  <div id="userLoginReq" class="login-required" style="display:none">
+    <p>⚠️ 请先扫码登录后使用爬取功能</p>
+    <button class="btn btn-primary" onclick="switchTab('login')">去登录</button>
+  </div>
+  <div id="userForm" class="card">
     <h2>爬取用户所有笔记</h2>
     <div class="form-group">
       <label>用户主页URL</label>
@@ -596,7 +625,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 
 <!-- 定时爬取页 -->
 <div id="page-scheduled" class="page">
-  <div class="card">
+  <div id="schedLoginReq" class="login-required" style="display:none">
+    <p>⚠️ 请先扫码登录后使用定时爬取功能</p>
+    <button class="btn btn-primary" onclick="switchTab('login')">去登录</button>
+  </div>
+  <div id="schedForm" class="card">
     <h2>定时爬取（多关键词轮询）</h2>
     <div class="status-bar">
       <span id="schedDot" class="dot dot-red"></span>
@@ -651,181 +684,236 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;backgrou
 </div>
 
 <script>
+// ====== 全局登录状态 ======
+let isLoggedIn = false;
+
+function updateLoginUI(loggedIn, nickname) {
+  isLoggedIn = loggedIn;
+  const badge = document.getElementById('loginBadge');
+  // 顶部徽章
+  if (loggedIn) {
+    badge.className = 'login-badge badge-logged';
+    badge.textContent = nickname || '已登录';
+  } else {
+    badge.className = 'login-badge badge-not';
+    badge.textContent = '未登录';
+  }
+  // 功能页登录提示
+  const reqs = ['searchLoginReq','notesLoginReq','userLoginReq','schedLoginReq'];
+  const forms = ['searchForm','notesForm','userForm','schedForm'];
+  reqs.forEach((id, i) => {
+    document.getElementById(id).style.display = loggedIn ? 'none' : 'block';
+    document.getElementById(forms[i]).style.display = loggedIn ? 'block' : 'none';
+  });
+}
+
 // Tab 切换
-document.querySelectorAll('.tab').forEach(t=>{
-  t.onclick=()=>{
-    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
-    document.querySelectorAll('.page').forEach(x=>x.classList.remove('active'));
-    t.classList.add('active');
-    document.getElementById('page-'+t.dataset.page).classList.add('active');
-  };
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => {
+    t.classList.remove('active');
+    if (t.dataset.page === name) t.classList.add('active');
+  });
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+}
+document.querySelectorAll('.tab').forEach(t => {
+  t.onclick = () => switchTab(t.dataset.page);
 });
 
 // 通用请求
-async function api(path,opts={}){
-  try{let r=await fetch(path,opts);return await r.json();}
-  catch(e){console.error(e);return {ok:false,msg:'请求失败'};}
+async function api(path, opts = {}) {
+  try {
+    let r = await fetch(path, opts);
+    return await r.json();
+  } catch (e) {
+    console.error(e);
+    return {ok: false, msg: '网络请求失败，请检查容器是否在运行'};
+  }
 }
 
 // ====== 登录 ======
-async function startLogin(){
-  document.getElementById('btnQR').disabled=true;
-  document.getElementById('qrArea').innerHTML='<p style="color:var(--muted)">正在生成二维码...</p>';
+async function startLogin() {
+  document.getElementById('btnQR').disabled = true;
+  document.getElementById('qrArea').innerHTML = '<p style="color:var(--muted)">正在生成二维码...</p>';
   await api('/api/login/qrcode');
   pollLogin();
 }
-function pollLogin(){
-  let t=setInterval(async()=>{
-    let d=await api('/api/login/status');
-    let badge=document.getElementById('loginBadge');
-    let dot=document.getElementById('loginDot');
-    let st=document.getElementById('loginStatus');
-    if(d.status==='scanning'&&d.qr_b64){
-      document.getElementById('qrArea').innerHTML='<img src="data:image/png;base64,'+d.qr_b64+'">';
-      st.textContent='等待扫码...';dot.className='dot dot-yellow';badge.className='login-badge badge-not';badge.textContent='扫码中';
-    }else if(d.status==='success'){
-      document.getElementById('qrArea').innerHTML='<div style="font-size:48px">✅</div><p style="color:var(--green);margin-top:8px">'+d.message+'</p>';
-      st.textContent=d.message;dot.className='dot dot-green';badge.className='login-badge badge-logged';badge.textContent=d.user_info?d.user_info.nickname:'已登录';
-      document.getElementById('btnQR').disabled=false;clearInterval(t);
-    }else if(d.status==='expired'){
-      document.getElementById('qrArea').innerHTML='<p style="color:var(--yellow)">二维码已过期</p><button class="btn btn-primary btn-sm" onclick="startLogin()" style="margin-top:8px">重新获取</button>';
-      st.textContent='二维码过期';dot.className='dot dot-red';badge.className='login-badge badge-not';badge.textContent='未登录';
-      document.getElementById('btnQR').disabled=false;clearInterval(t);
-    }else if(d.status==='failed'){
-      st.textContent=d.message;dot.className='dot dot-red';badge.className='login-badge badge-not';badge.textContent='失败';
-      document.getElementById('btnQR').disabled=false;clearInterval(t);
+function pollLogin() {
+  let t = setInterval(async () => {
+    let d = await api('/api/login/status');
+    let badge = document.getElementById('loginBadge');
+    let dot = document.getElementById('loginDot');
+    let st = document.getElementById('loginStatus');
+    if (d.status === 'scanning' && d.qr_b64) {
+      document.getElementById('qrArea').innerHTML = '<img src="data:image/png;base64,' + d.qr_b64 + '">';
+      st.textContent = '等待扫码...'; dot.className = 'dot dot-yellow';
+      badge.className = 'login-badge badge-logging'; badge.textContent = '扫码中';
+    } else if (d.status === 'success') {
+      document.getElementById('qrArea').innerHTML = '<div style="font-size:48px">✅</div><p style="color:var(--green);margin-top:8px">' + d.message + '</p>';
+      st.textContent = d.message; dot.className = 'dot dot-green';
+      let nick = d.user_info ? d.user_info.nickname : '已登录';
+      updateLoginUI(true, nick);
+      document.getElementById('btnQR').disabled = false;
+      clearInterval(t);
+    } else if (d.status === 'expired') {
+      document.getElementById('qrArea').innerHTML = '<p style="color:var(--yellow)">二维码已过期</p><button class="btn btn-primary btn-sm" onclick="startLogin()" style="margin-top:8px">重新获取</button>';
+      st.textContent = '二维码过期'; dot.className = 'dot dot-red';
+      updateLoginUI(false);
+      document.getElementById('btnQR').disabled = false;
+      clearInterval(t);
+    } else if (d.status === 'failed') {
+      st.textContent = d.message; dot.className = 'dot dot-red';
+      updateLoginUI(false);
+      document.getElementById('btnQR').disabled = false;
+      clearInterval(t);
     }
-  },2000);
+  }, 2000);
 }
-async function checkCookie(){
-  let d=await api('/api/login/check');
-  let badge=document.getElementById('loginBadge');
-  let dot=document.getElementById('loginDot');
-  let st=document.getElementById('loginStatus');
-  if(d.valid){badge.className='login-badge badge-logged';badge.textContent=d.nickname||'已登录';dot.className='dot dot-green';st.textContent='Cookie有效: '+(d.nickname||'');}
-  else{badge.className='login-badge badge-not';badge.textContent='未登录';dot.className='dot dot-red';st.textContent='Cookie无效或已过期';}
+async function checkCookie() {
+  let d = await api('/api/login/check');
+  let dot = document.getElementById('loginDot');
+  let st = document.getElementById('loginStatus');
+  if (d.valid) {
+    updateLoginUI(true, d.nickname || '已登录');
+    dot.className = 'dot dot-green';
+    st.textContent = 'Cookie有效: ' + (d.nickname || '');
+  } else {
+    updateLoginUI(false);
+    dot.className = 'dot dot-red';
+    st.textContent = 'Cookie无效或已过期，请重新扫码登录';
+  }
 }
-async function clearCookie(){
-  if(!confirm('确认清除已保存的Cookie？'))return;
+async function clearCookie() {
+  if (!confirm('确认清除已保存的Cookie？清除后需重新扫码登录。')) return;
   await api('/api/login/clear');
-  document.getElementById('loginBadge').className='login-badge badge-not';
-  document.getElementById('loginBadge').textContent='未登录';
-  document.getElementById('loginDot').className='dot dot-red';
-  document.getElementById('loginStatus').textContent='Cookie已清除';
-  document.getElementById('qrArea').innerHTML='<p style="color:var(--muted)">Cookie已清除</p>';
+  updateLoginUI(false);
+  document.getElementById('loginDot').className = 'dot dot-red';
+  document.getElementById('loginStatus').textContent = 'Cookie已清除，请重新扫码登录';
+  document.getElementById('qrArea').innerHTML = '<p style="color:var(--muted)">Cookie已清除</p>';
 }
 
 // ====== 搜索 ======
-async function doSearch(){
-  let q=document.getElementById('searchQuery').value.trim();
-  if(!q){alert('请输入关键词');return;}
-  document.getElementById('btnSearch').disabled=true;
-  await api('/api/task/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    query:q,num:parseInt(document.getElementById('searchNum').value)||20,
-    save:document.getElementById('searchSave').value,sort:parseInt(document.getElementById('searchSort').value),
-    note_type:parseInt(document.getElementById('searchNoteType').value),note_time:parseInt(document.getElementById('searchNoteTime').value)
+async function doSearch() {
+  let q = document.getElementById('searchQuery').value.trim();
+  if (!q) { alert('请输入关键词'); return; }
+  if (!isLoggedIn) { alert('请先扫码登录'); switchTab('login'); return; }
+  document.getElementById('btnSearch').disabled = true;
+  let d = await api('/api/task/search', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+    query: q, num: parseInt(document.getElementById('searchNum').value) || 20,
+    save: document.getElementById('searchSave').value, sort: parseInt(document.getElementById('searchSort').value),
+    note_type: parseInt(document.getElementById('searchNoteType').value), note_time: parseInt(document.getElementById('searchNoteTime').value)
   })});
-  document.getElementById('btnSearch').disabled=false;
-  switchTab('logs');
+  document.getElementById('btnSearch').disabled = false;
+  if (d.ok) { switchTab('logs'); }
+  else { alert(d.msg || '操作失败'); }
 }
 
 // ====== 爬取笔记 ======
-async function doCrawlNotes(){
-  let urls=document.getElementById('noteUrls').value.trim().split('\\n').map(s=>s.trim()).filter(s=>s);
-  if(!urls.length){alert('请输入笔记URL');return;}
-  document.getElementById('btnNotes').disabled=true;
-  await api('/api/task/notes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({urls:urls})});
-  document.getElementById('btnNotes').disabled=false;
-  switchTab('logs');
+async function doCrawlNotes() {
+  let urls = document.getElementById('noteUrls').value.trim().split('\\n').map(s => s.trim()).filter(s => s);
+  if (!urls.length) { alert('请输入笔记URL'); return; }
+  if (!isLoggedIn) { alert('请先扫码登录'); switchTab('login'); return; }
+  document.getElementById('btnNotes').disabled = true;
+  let d = await api('/api/task/notes', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({urls: urls})});
+  document.getElementById('btnNotes').disabled = false;
+  if (d.ok) { switchTab('logs'); }
+  else { alert(d.msg || '操作失败'); }
 }
 
 // ====== 爬取用户 ======
-async function doCrawlUser(){
-  let url=document.getElementById('userUrl').value.trim();
-  if(!url){alert('请输入用户URL');return;}
-  document.getElementById('btnUser').disabled=true;
-  await api('/api/task/user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    url:url,save:document.getElementById('userSave').value
+async function doCrawlUser() {
+  let url = document.getElementById('userUrl').value.trim();
+  if (!url) { alert('请输入用户URL'); return; }
+  if (!isLoggedIn) { alert('请先扫码登录'); switchTab('login'); return; }
+  document.getElementById('btnUser').disabled = true;
+  let d = await api('/api/task/user', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+    url: url, save: document.getElementById('userSave').value
   })});
-  document.getElementById('btnUser').disabled=false;
-  switchTab('logs');
+  document.getElementById('btnUser').disabled = false;
+  if (d.ok) { switchTab('logs'); }
+  else { alert(d.msg || '操作失败'); }
 }
 
 // ====== 定时爬取 ======
-async function startSched(){
-  let kw=document.getElementById('schedKeywords').value.trim();
-  if(!kw){alert('请输入关键词');return;}
-  document.getElementById('btnSchedStart').disabled=true;
-  await api('/api/scheduled/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-    keywords:kw.split(',').map(s=>s.trim()).filter(s=>s),
-    num:parseInt(document.getElementById('schedNum').value)||20,
-    interval:parseInt(document.getElementById('schedInterval').value)||30,
-    round:parseFloat(document.getElementById('schedRound').value)||4,
-    save:document.getElementById('schedSave').value,
-    sort:parseInt(document.getElementById('schedSort').value),
-    note_time:parseInt(document.getElementById('schedTime').value)
+async function startSched() {
+  let kw = document.getElementById('schedKeywords').value.trim();
+  if (!kw) { alert('请输入关键词'); return; }
+  if (!isLoggedIn) { alert('请先扫码登录'); switchTab('login'); return; }
+  document.getElementById('btnSchedStart').disabled = true;
+  let d = await api('/api/scheduled/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+    keywords: kw.split(',').map(s => s.trim()).filter(s => s),
+    num: parseInt(document.getElementById('schedNum').value) || 20,
+    interval: parseInt(document.getElementById('schedInterval').value) || 30,
+    round: parseFloat(document.getElementById('schedRound').value) || 4,
+    save: document.getElementById('schedSave').value,
+    sort: parseInt(document.getElementById('schedSort').value),
+    note_time: parseInt(document.getElementById('schedTime').value)
   })});
-  document.getElementById('btnSchedStart').disabled=false;
-  updateSchedUI();
-  switchTab('logs');
+  document.getElementById('btnSchedStart').disabled = false;
+  if (d.ok) { updateSchedUI(); switchTab('logs'); }
+  else { alert(d.msg || '操作失败'); }
 }
-async function stopSched(){
+async function stopSched() {
   await api('/api/scheduled/stop');
   updateSchedUI();
 }
-async function updateSchedUI(){
-  let d=await api('/api/scheduled/status');
-  let dot=document.getElementById('schedDot');
-  let st=document.getElementById('schedStatus');
-  let btnS=document.getElementById('btnSchedStart');
-  let btnX=document.getElementById('btnSchedStop');
-  let info=document.getElementById('schedInfo');
-  if(d.running){
-    dot.className='dot dot-green';st.textContent='运行中 (第'+d.round+'轮)';
-    btnS.style.display='none';btnX.style.display='';
-    info.style.display='';
-    document.getElementById('schedDetail').innerHTML='关键词: '+d.config.keywords.map(k=>'<span class="chip chip-blue">'+k+'</span>').join('')+'<br>每词爬取: <span class="chip chip-green">'+d.config.num+'条</span> 间隔: <span class="chip chip-green">'+d.config.interval+'分钟</span> 轮次间隔: <span class="chip chip-green">'+d.config.round+'小时</span>';
-  }else{
-    dot.className='dot dot-red';st.textContent='未运行';
-    btnS.style.display='';btnX.style.display='none';
-    info.style.display='none';
+async function updateSchedUI() {
+  let d = await api('/api/scheduled/status');
+  let dot = document.getElementById('schedDot');
+  let st = document.getElementById('schedStatus');
+  let btnS = document.getElementById('btnSchedStart');
+  let btnX = document.getElementById('btnSchedStop');
+  let info = document.getElementById('schedInfo');
+  if (d.running) {
+    dot.className = 'dot dot-green'; st.textContent = '运行中 (第' + d.round + '轮)';
+    btnS.style.display = 'none'; btnX.style.display = '';
+    info.style.display = '';
+    document.getElementById('schedDetail').innerHTML = '关键词: ' + d.config.keywords.map(k => '<span class="chip chip-blue">' + k + '</span>').join('') + '<br>每词爬取: <span class="chip chip-green">' + d.config.num + '条</span> 间隔: <span class="chip chip-green">' + d.config.interval + '分钟</span> 轮次间隔: <span class="chip chip-green">' + d.config.round + '小时</span>';
+  } else {
+    dot.className = 'dot dot-red'; st.textContent = '未运行';
+    btnS.style.display = ''; btnX.style.display = 'none';
+    info.style.display = 'none';
   }
 }
 
 // ====== 日志 ======
-function switchTab(name){
-  document.querySelectorAll('.tab').forEach(t=>{t.classList.remove('active');if(t.dataset.page===name)t.classList.add('active');});
-  document.querySelectorAll('.page').forEach(p=>{p.classList.remove('active');});
-  document.getElementById('page-'+name).classList.add('active');
-}
-let logTimer=null;
-async function refreshLogs(){
-  let d=await api('/api/logs');
-  let box=document.getElementById('logBox');
-  let bar=document.getElementById('taskStatusBar');
-  let info=document.getElementById('taskInfo');
-  if(d.task_running){bar.style.display='flex';info.textContent=d.current_task||'运行中';}
-  else{bar.style.display='none';}
-  let html='';
-  (d.logs||[]).forEach(l=>{
-    let cls='log-info';
-    if(l.includes('[SUCCESS]'))cls='log-success';
-    else if(l.includes('[WARNING]'))cls='log-warning';
-    else if(l.includes('[ERROR]'))cls='log-error';
-    html+='<div class="'+cls+'">'+l.replace(/</g,'&lt;')+'</div>';
+let logTimer = null;
+async function refreshLogs() {
+  let d = await api('/api/logs');
+  let box = document.getElementById('logBox');
+  let bar = document.getElementById('taskStatusBar');
+  let info = document.getElementById('taskInfo');
+  if (d.task_running) { bar.style.display = 'flex'; info.textContent = d.current_task || '运行中'; }
+  else { bar.style.display = 'none'; }
+  let html = '';
+  (d.logs || []).forEach(l => {
+    let cls = 'log-info';
+    if (l.includes('[SUCCESS]')) cls = 'log-success';
+    else if (l.includes('[WARNING]')) cls = 'log-warning';
+    else if (l.includes('[ERROR]')) cls = 'log-error';
+    html += '<div class="' + cls + '">' + l.replace(/</g, '&lt;') + '</div>';
   });
-  box.innerHTML=html;
-  if(document.getElementById('autoScroll').checked){box.scrollTop=box.scrollHeight;}
+  box.innerHTML = html;
+  if (document.getElementById('autoScroll').checked) { box.scrollTop = box.scrollHeight; }
 }
-function clearLogs(){fetch('/api/logs/clear');document.getElementById('logBox').innerHTML='';}
+function clearLogs() { fetch('/api/logs/clear'); document.getElementById('logBox').innerHTML = ''; }
 
 // 自动刷新日志
-logTimer=setInterval(refreshLogs,3000);
+logTimer = setInterval(refreshLogs, 3000);
 refreshLogs();
 
-// 页面加载时检查登录状态
-checkCookie();
-updateSchedUI();
+// 页面加载时检查登录状态（不弹提示，静默检查）
+(async function() {
+  let d = await api('/api/login/check');
+  if (d.valid) {
+    updateLoginUI(true, d.nickname || '已登录');
+    document.getElementById('loginDot').className = 'dot dot-green';
+    document.getElementById('loginStatus').textContent = 'Cookie有效: ' + (d.nickname || '');
+  } else {
+    updateLoginUI(false);
+  }
+  updateSchedUI();
+})();
 </script>
 </body>
 </html>'''
@@ -862,19 +950,21 @@ def api_login_check():
     """检查已保存的cookie是否有效"""
     saved, login_time = load_saved_cookies()
     if saved:
-        # 在后台线程验证，避免阻塞
+        # 在后台线程验证，避免阻塞请求
         valid = validate_cookies(saved)
         if valid:
             with state_lock:
                 app_state['cookies_str'] = saved
+                app_state['cookie_valid'] = True
                 app_state['login_status'] = 'success'
                 app_state['login_message'] = f'已登录 (Cookie保存于 {login_time})'
             return jsonify({'valid': True, 'nickname': f'Cookie保存于 {login_time}'})
         else:
             with state_lock:
                 app_state['cookies_str'] = None
+                app_state['cookie_valid'] = False
                 app_state['login_status'] = 'not_logged'
-                app_state['login_message'] = 'Cookie已过期'
+                app_state['login_message'] = 'Cookie已过期，请重新扫码登录'
             return jsonify({'valid': False})
     return jsonify({'valid': False})
 
@@ -889,6 +979,7 @@ def api_login_clear():
         pass
     with state_lock:
         app_state['cookies_str'] = None
+        app_state['cookie_valid'] = False
         app_state['login_status'] = 'not_logged'
         app_state['login_message'] = 'Cookie已清除'
     return jsonify({'ok': True})
@@ -1052,13 +1143,16 @@ if __name__ == '__main__':
     # 尝试加载已保存的 cookie
     saved, login_time = load_saved_cookies()
     if saved:
-        logger.info(f"发现已保存的Cookie ({login_time})，可在登录页点击检查验证")
+        logger.info(f"发现已保存的Cookie ({login_time})，请在登录页点击「验证Cookie」检查是否有效")
         with state_lock:
             app_state['cookies_str'] = saved
-            app_state['login_message'] = f'发现保存的Cookie ({login_time})'
+            app_state['login_message'] = f'发现保存的Cookie ({login_time})，请验证'
+    else:
+        logger.info("未发现保存的Cookie，请扫码登录")
 
     port = int(os.getenv('WEB_PORT', '5000'))
     logger.info(f"小红书爬虫Web后台启动: http://0.0.0.0:{port}")
-    logger.info("浏览器打开 http://群晖IP:5000 使用")
+    logger.info("操作流程: 浏览器打开 → 扫码登录 → 使用功能")
+    logger.info("无需任何环境变量，不需要填写关键词即可启动")
 
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
