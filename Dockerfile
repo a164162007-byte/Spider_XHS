@@ -39,5 +39,5 @@ EXPOSE 5000
 ENV PYTHONUNBUFFERED=1
 ENV NODE_ENV=production
 
-# 默认启动原有爬虫入口（原功能不变）
-CMD ["python", "-m", "spider.spider"]
+# 默认启动Web后台（浏览器操作所有功能）
+CMD ["python", "web_app.py"]
